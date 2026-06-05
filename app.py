@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import streamlit as st
+import chromadb
 from langchain_chroma import Chroma
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
@@ -102,10 +103,12 @@ def split_documents(documents: Iterable[Document]) -> list[Document]:
 
 
 def create_vector_store(chunks: list[Document], api_key: str) -> Chroma:
+    client = chromadb.EphemeralClient()
     return Chroma.from_documents(
         documents=chunks,
         embedding=get_embeddings(api_key),
         collection_name="pdf_chat_google",
+        client=client,
     )
 
 
