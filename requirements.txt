@@ -4,4 +4,4 @@ langchain-text-splitters
 langchain-google-genai
 pypdf 
 streamlit
-
+protobuf<5.0.0
