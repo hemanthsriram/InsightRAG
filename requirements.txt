@@ -1,8 +1,9 @@
 langchain
-langchain-chroma
+langchain-community
 langchain-text-splitters
 langchain-google-genai
 langchain-classic
+faiss-cpu
 pypdf
+streamlit
 protobuf<5.0.0
-

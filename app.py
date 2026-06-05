@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import streamlit as st
-import chromadb
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
@@ -30,7 +29,7 @@ class ProcessedPdf:
     file_name: str
     chunk_count: int
     page_count: int
-    vector_store: Chroma
+    vector_store: FAISS
 
 
 def configure_page() -> None:
@@ -105,55 +104,14 @@ def split_documents(documents: Iterable[Document]) -> list[Document]:
     return splitter.split_documents(list(documents))
 
 
-def create_vector_store(chunks: list[Document], api_key: str) -> Chroma:
-    client = chromadb.EphemeralClient()
-    embeddings = get_embeddings(api_key)
-
-    # Create the store with the first batch
-    first_batch = chunks[:BATCH_SIZE]
-    remaining = chunks[BATCH_SIZE:]
-
-    vector_store = _retry_from_documents(first_batch, embeddings, client)
-
-    # Add remaining chunks in batches with retry logic
-    for i in range(0, len(remaining), BATCH_SIZE):
-        batch = remaining[i : i + BATCH_SIZE]
-        for attempt in range(MAX_RETRIES):
-            try:
-                vector_store.add_documents(batch)
-                break
-            except Exception as exc:
-                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
-                    wait = 2 ** attempt
-                    time.sleep(wait)
-                else:
-                    raise
-        else:
-            raise RuntimeError(
-                "Embedding failed after multiple retries. "
-                "The API rate limit may be too restrictive for this PDF size. "
-                "Please try again in a few minutes or use a smaller PDF."
-            )
-        # Small delay between successful batches to stay under rate limits
-        time.sleep(1)
-
-    return vector_store
-
-
-def _retry_from_documents(
-    docs: list[Document],
+def _embed_with_retry(
+    texts: list[str],
     embeddings: GoogleGenerativeAIEmbeddings,
-    client: chromadb.ClientAPI,
-) -> Chroma:
-    """Create a Chroma store from documents with retry on rate-limit errors."""
+) -> list[list[float]]:
+    """Embed a list of texts with exponential backoff on rate-limit errors."""
     for attempt in range(MAX_RETRIES):
         try:
-            return Chroma.from_documents(
-                documents=docs,
-                embedding=embeddings,
-                collection_name="pdf_chat_google",
-                client=client,
-            )
+            return embeddings.embed_documents(texts)
         except Exception as exc:
             if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
                 wait = 2 ** attempt
@@ -161,9 +119,53 @@ def _retry_from_documents(
             else:
                 raise
     raise RuntimeError(
-        "Could not create the initial vector store after multiple retries. "
-        "Please try again in a few minutes."
+        "Embedding failed after multiple retries. "
+        "Please try again in a few minutes or use a smaller PDF."
     )
+
+
+def create_vector_store(chunks: list[Document], api_key: str) -> FAISS:
+    """Create a FAISS vector store from document chunks.
+
+    FAISS stores its index as a pure Python object — each call produces
+    a completely independent instance with zero shared global state.
+    This guarantees that different Streamlit sessions never interfere
+    with each other.
+    """
+    embeddings = get_embeddings(api_key)
+
+    # Embed the first batch and create the FAISS store
+    first_batch = chunks[:BATCH_SIZE]
+    remaining = chunks[BATCH_SIZE:]
+
+    first_texts = [doc.page_content for doc in first_batch]
+    first_vectors = _embed_with_retry(first_texts, embeddings)
+    text_embedding_pairs = list(zip(first_texts, first_vectors))
+
+    vector_store = FAISS.from_embeddings(
+        text_embeddings=text_embedding_pairs,
+        embedding=embeddings,
+        metadatas=[doc.metadata for doc in first_batch],
+    )
+
+    # Add remaining chunks in batches with retry logic
+    for i in range(0, len(remaining), BATCH_SIZE):
+        batch = remaining[i : i + BATCH_SIZE]
+        batch_texts = [doc.page_content for doc in batch]
+        batch_vectors = _embed_with_retry(batch_texts, embeddings)
+        batch_pairs = list(zip(batch_texts, batch_vectors))
+
+        batch_store = FAISS.from_embeddings(
+            text_embeddings=batch_pairs,
+            embedding=embeddings,
+            metadatas=[doc.metadata for doc in batch],
+        )
+        vector_store.merge_from(batch_store)
+
+        # Small delay between batches to stay under rate limits
+        time.sleep(1)
+
+    return vector_store
 
 
 def process_pdf(uploaded_file, api_key: str) -> ProcessedPdf:
@@ -186,7 +188,7 @@ def process_pdf(uploaded_file, api_key: str) -> ProcessedPdf:
 
 
 def answer_question(
-    vector_store: Chroma,
+    vector_store: FAISS,
     question: str,
     api_key: str,
 ) -> tuple[str, list[Document]]:
