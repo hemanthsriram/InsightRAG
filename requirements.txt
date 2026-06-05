@@ -1,7 +1,8 @@
-langchain 
+langchain
 langchain-chroma
 langchain-text-splitters
 langchain-google-genai
-pypdf 
-streamlit
+langchain-classic
+pypdf
 protobuf<5.0.0
+
