@@ -1,4 +1,5 @@
 import os
+import time
 import tempfile
 from dataclasses import dataclass
 from typing import Iterable
@@ -17,8 +18,10 @@ from pypdf import PdfReader
 APP_TITLE = "PDF Chat"
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 LLM_MODEL = "gemini-2.5-flash"
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 180
+CHUNK_SIZE = 2000
+CHUNK_OVERLAP = 200
+BATCH_SIZE = 10
+MAX_RETRIES = 5
 RESULT_COUNT = 4
 
 
@@ -104,11 +107,62 @@ def split_documents(documents: Iterable[Document]) -> list[Document]:
 
 def create_vector_store(chunks: list[Document], api_key: str) -> Chroma:
     client = chromadb.EphemeralClient()
-    return Chroma.from_documents(
-        documents=chunks,
-        embedding=get_embeddings(api_key),
-        collection_name="pdf_chat_google",
-        client=client,
+    embeddings = get_embeddings(api_key)
+
+    # Create the store with the first batch
+    first_batch = chunks[:BATCH_SIZE]
+    remaining = chunks[BATCH_SIZE:]
+
+    vector_store = _retry_from_documents(first_batch, embeddings, client)
+
+    # Add remaining chunks in batches with retry logic
+    for i in range(0, len(remaining), BATCH_SIZE):
+        batch = remaining[i : i + BATCH_SIZE]
+        for attempt in range(MAX_RETRIES):
+            try:
+                vector_store.add_documents(batch)
+                break
+            except Exception as exc:
+                if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                    wait = 2 ** attempt
+                    time.sleep(wait)
+                else:
+                    raise
+        else:
+            raise RuntimeError(
+                "Embedding failed after multiple retries. "
+                "The API rate limit may be too restrictive for this PDF size. "
+                "Please try again in a few minutes or use a smaller PDF."
+            )
+        # Small delay between successful batches to stay under rate limits
+        time.sleep(1)
+
+    return vector_store
+
+
+def _retry_from_documents(
+    docs: list[Document],
+    embeddings: GoogleGenerativeAIEmbeddings,
+    client: chromadb.ClientAPI,
+) -> Chroma:
+    """Create a Chroma store from documents with retry on rate-limit errors."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return Chroma.from_documents(
+                documents=docs,
+                embedding=embeddings,
+                collection_name="pdf_chat_google",
+                client=client,
+            )
+        except Exception as exc:
+            if "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc):
+                wait = 2 ** attempt
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError(
+        "Could not create the initial vector store after multiple retries. "
+        "Please try again in a few minutes."
     )
 
 
