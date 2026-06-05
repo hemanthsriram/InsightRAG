@@ -233,7 +233,7 @@ def render_app() -> None:
 
     with col_a:
         build_clicked = st.button(
-            "Build index",
+            "Start Chat",
             disabled=uploaded_file is None,
             use_container_width=True,
         )
@@ -268,7 +268,7 @@ def render_app() -> None:
     question = st.chat_input("Ask about the PDF")
     if question:
         if not st.session_state.processed_pdf:
-            st.warning("Upload a PDF and build the index first.")
+            st.warning("Upload a PDF and click 'Start Chat' first.")
             st.stop()
 
         st.session_state.messages.append({"role": "user", "content": question})
